@@ -28,8 +28,6 @@ resource "null_resource" "argocd_applications" {
 
   provisioner "local-exec" {
     command = <<EOT
-      kubectl apply -f role.yaml --kubeconfig=${local_file.kubeconfig.filename} --validate=false
-      kubectl apply -f rolebinding.yaml --kubeconfig=${local_file.kubeconfig.filename} --validate=false
       kubectl apply -f ./argo/${var.environment}/argocd-app-1.yml --kubeconfig=${local_file.kubeconfig.filename} --validate=false --namespace=argocd
       kubectl apply -f ./argo/${var.environment}/argocd-app-2.yml --kubeconfig=${local_file.kubeconfig.filename} --validate=false --namespace=argocd
     EOT
