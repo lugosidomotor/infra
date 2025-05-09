@@ -16,6 +16,12 @@ EOF
   ]
 }
 
+# NOTE: I’m fully aware that this `null_resource` + `local-exec` block is a quick‑and‑dirty
+# “redneck” workaround. In a cleaner, fully declarative Terraform setup we would:
+#   • use `kubernetes_manifest` resources, or
+#   • define the apps via the `argocd_application` resource from the Argo CD provider, or
+#   • bootstrap them through Helm values in an “app‑of‑apps” pattern.
+
 resource "local_file" "kubeconfig" {
   content  = azurerm_kubernetes_cluster.aks.kube_config_raw
   filename = "${path.module}/kubeconfig"
