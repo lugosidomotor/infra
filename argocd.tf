@@ -35,7 +35,5 @@ resource "null_resource" "argocd_applications" {
 
   depends_on = [
     helm_release.argocd,
-    azurerm_key_vault.kv,
-    azurerm_storage_account.storage
   ]
 }
