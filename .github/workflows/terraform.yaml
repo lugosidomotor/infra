@@ -1,0 +1,209 @@
+name: Deploy/Destroy Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      terraform-action:
+        description: 'Apply or Destroy'
+        required: true
+        type: choice
+        options: 
+        - apply
+        - destroy
+      azure-region:
+        description: 'Azure Region'
+        required: false
+        type: string
+        default: 'germanywestcentral'
+      company:
+        description: 'Company name'
+        required: false
+        type: string
+        default: 'homework'
+      environment:
+        description: 'Environment'
+        type: choice
+        required: false
+        options:
+        - dev
+        - qa
+        - prod
+        default: dev
+        
+jobs:
+  terraform_apply:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+      with:
+        ref: ${{ github.ref }}
+        
+    # Determine the current branch name
+    - name: Set branch related envs
+      id: getbranch
+      run: |
+        branch_name=$(git branch --show-current)
+        echo "CURRENT_BRANCH=$branch_name" >> $GITHUB_ENV
+        unique_suffix="lint-changes-$(date +'%Y%m%d%H%M%S')"
+        echo BRANCH_NAME="$branch_name-$unique_suffix"  >> $GITHUB_ENV
+
+    - name: Install Terraform
+      run: |
+        # Install the latest version of Terraform
+        TERRAFORM_VERSION=$(curl -s https://checkpoint-api.hashicorp.com/v1/check/terraform | jq -r -M '.current_version')
+        wget https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+        unzip terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+        sudo mv terraform /usr/local/bin/
+        terraform version
+  
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Ensure Resource Group Exists
+      run: |
+        resource_group="rg-${{ github.event.inputs.company }}-${{ github.event.inputs.environment }}-terraform"
+        location="${{ github.event.inputs['azure-region'] }}"
+    
+        # Check if the resource group exists
+        rg_check=$(az group exists --name "$resource_group")
+        if [ "$rg_check" = "false" ]; then
+          echo "Resource group does not exist. Creating $resource_group..."
+          az group create --name "$resource_group" --location "$location"
+          echo "Resource group created: $resource_group"
+        else
+          echo "Resource group already exists: $resource_group"
+        fi
+
+    - name: Check if Azure Storage Account Exists
+      run: |
+        resource_group="rg-${{ github.event.inputs.company }}-${{ github.event.inputs.environment }}-terraform"
+        storage_account_name="sa${{ github.event.inputs.company }}${{ github.event.inputs.environment }}terraform"  # Updated storage account name to meet naming conventions
+        location="${{ github.event.inputs['azure-region'] }}"
+    
+        # Check if the storage account exists
+        storage_account_check=$(az storage account check-name --name "$storage_account_name" --query "nameAvailable" --output tsv)
+        if [ "$storage_account_check" = "true" ]; then
+          echo "Storage account does not exist. Creating $storage_account_name..."
+          az storage account create --name "$storage_account_name" --resource-group "$resource_group" --location "$location" --sku Standard_LRS
+          echo "Storage account created: $storage_account_name"
+          sleep 120
+          account_key=$(az storage account keys list --resource-group "$resource_group" --account-name "$storage_account_name" --query "[0].value" --output tsv)
+          az storage container create --name "tfstate" --account-name "$storage_account_name" --account-key "$account_key"
+          echo "tfstate container created."
+        else
+          echo "Storage account already exists: $storage_account_name"
+        fi
+
+    - name: Get Storage Account Key
+      id: get_storage_key
+      run: |
+        storage_account_name="sa${{ github.event.inputs.company }}${{ github.event.inputs.environment }}terraform"
+        storage_account_key=$(az storage account keys list --resource-group "rg-${{ github.event.inputs.company }}-${{ github.event.inputs.environment }}-terraform" --account-name "$storage_account_name" --query "[0].value" -o tsv)
+        echo "::set-output name=storage_account_key::$storage_account_key"
+
+    - name: Terraform Init
+      run: |
+        terraform init \
+          -backend-config="storage_account_name=sa${{ github.event.inputs.company }}${{ github.event.inputs.environment }}terraform" \
+          -backend-config="container_name=tfstate" \
+          -backend-config="key=${{ github.event.inputs.company }}-${{ github.event.inputs.environment }}.terraform.tfstate" \
+          -backend-config="access_key=${{ steps.get_storage_key.outputs.storage_account_key }}" \
+          -backend-config="resource_group_name=rg-${{ github.event.inputs.company }}-${{ github.event.inputs.environment }}-terraform"
+          
+    - name: Terraform Format
+      run: terraform fmt
+
+    - name: Terraform Validate
+      run: terraform validate
+
+    # An exit code of 0 indicated no changes, 1 a terraform failure, 2 there are pending changes.
+    - name: Terraform Plan
+      id: tf-plan
+      run: |
+        export exitcode=0
+        terraform plan \
+          -var="tenant_id=${{ secrets.AZURE_TENAND_ID }}" \
+          -var="location=${{ github.event.inputs['azure-region'] }}" \
+          -var="company=${{ github.event.inputs.company }}" \
+          -var="environment=${{ github.event.inputs.environment }}" \
+          -var="resource_group_name=rg-${{ github.event.inputs.company }}-${{ github.event.inputs.environment }}" \
+          -detailed-exitcode -no-color -out tfplan || export exitcode=$?
+    
+        echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
+    
+        if [ $exitcode -eq 1 ]; then
+          echo Terraform Plan Failed!
+          exit 1
+        else 
+          exit 0
+        fi
+        
+    # Save plan to artifacts  
+    - name: Publish Terraform Plan
+      uses: actions/upload-artifact@v4
+      with:
+        name: tfplan
+        path: tfplan
+        
+    # Create string output of Terraform Plan
+    - name: Create String Output
+      id: tf-plan-string
+      run: |
+        TERRAFORM_PLAN=$(terraform show -no-color tfplan)
+        
+        delimiter="$(openssl rand -hex 8)"
+        echo "summary<<${delimiter}" >> $GITHUB_OUTPUT
+        echo "## Terraform Plan Output" >> $GITHUB_OUTPUT
+        echo "<details><summary>Click to expand</summary>" >> $GITHUB_OUTPUT
+        echo "" >> $GITHUB_OUTPUT
+        echo '```terraform' >> $GITHUB_OUTPUT
+        echo "$TERRAFORM_PLAN" >> $GITHUB_OUTPUT
+        echo '```' >> $GITHUB_OUTPUT
+        echo "</details>" >> $GITHUB_OUTPUT
+        echo "${delimiter}" >> $GITHUB_OUTPUT
+        
+    # Publish Terraform Plan as task summary
+    - name: Publish Terraform Plan to Task Summary
+      env:
+        SUMMARY: ${{ steps.tf-plan-string.outputs.summary }}
+      run: |
+        echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+
+    - name: Terraform Apply
+      env:
+        TF_INPUT: 0
+      run: |
+        terraform ${{ github.event.inputs['terraform-action'] }} \
+          -var="tenant_id=${{ secrets.AZURE_TENAND_ID }}" \
+          -var="location=${{ github.event.inputs['azure-region'] }}" \
+          -var="company=${{ github.event.inputs.company }}" \
+          -var="environment=${{ github.event.inputs.environment }}" \
+          -var="resource_group_name=rg-${{ github.event.inputs.company }}-${{ github.event.inputs.environment }}" \
+          -auto-approve
+
+    # Check if linting made any changes
+    - name: Check for modified files
+      id: git-check
+      run: |
+        git diff --exit-code || echo "##[set-output name=changed;]true"
+
+    - name: Run the Action
+      if: steps.git-check.outputs.changed == 'true'
+      uses: devops-infra/action-commit-push@master
+      with:
+        github_token: "${{ secrets.GITHUB_TOKEN }}"
+        add_timestamp: false
+        commit_prefix: "[AUTO] "
+        commit_message: "automated Terraform fmt fixes from the GitHub Actions workflow"
+        force: false
+        target_branch: ${{ env.BRANCH_NAME }}
+
+    - name: Create Pull Request
+      if: steps.git-check.outputs.changed == 'true'
+      run: |
+        gh auth login --with-token <<< "${{ secrets.GITHUB_TOKEN }}"
+        gh pr create --base ${{ env.CURRENT_BRANCH }} --head ${{ env.BRANCH_NAME }} --title "Automated Terraform format for ${{ env.CURRENT_BRANCH }} branch" --body "This PR contains automated lint fixes for ${{ env.CURRENT_BRANCH }} branch"
