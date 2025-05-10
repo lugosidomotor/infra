@@ -11,39 +11,33 @@ resource "azurerm_kubernetes_cluster" "aks" {
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
   dns_prefix          = "${var.company}-${var.environment}-aks"
-
+  
   default_node_pool {
-    name                = "default"
-    vm_size             = "Standard_DS2_v2"
-
-    enable_auto_scaling = true
-    min_count           = 1
-    max_count           = 5
+    name       = "default"
+    vm_size    = "Standard_DS2_v2"
+    min_count  = 1
+    max_count  = 5
   }
-
+  
   role_based_access_control_enabled = true
-
-  addon_profile {
-    open_service_mesh {
-      enabled = true
-    }
+  
+  oms_agent {
+    log_analytics_workspace_id = azurerm_log_analytics_workspace.law.id
   }
-
-  security_profile {
-    defender {
-      log_analytics_workspace_id = azurerm_log_analytics_workspace.law.id
-    }
+  
+  microsoft_defender {
+    log_analytics_workspace_id = azurerm_log_analytics_workspace.law.id
   }
-
+  
   network_profile {
     network_plugin    = "azure"
     load_balancer_sku = "standard"
   }
-
+  
   identity {
     type = "SystemAssigned"
   }
-
+  
   tags = {
     environment = var.environment
     company     = var.company
